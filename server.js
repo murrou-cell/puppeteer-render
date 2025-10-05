@@ -1,5 +1,12 @@
 import express from "express";
-import puppeteer from "puppeteer";
+import puppeteerExtra from "puppeteer-extra";
+import puppeteer from "puppeteer"; // make sure Puppeteer is installed
+import AdblockerPlugin from "puppeteer-extra-plugin-adblocker";
+
+// debug is enabled if first argument is "debug"
+const debug = process.argv[2] === "debug";
+
+puppeteerExtra.use(AdblockerPlugin());
 
 const app = express();
 app.use(express.json());
@@ -13,18 +20,28 @@ app.post("/render", async (req, res) => {
   console.log(`Rendering URL: ${url} with clicks: ${JSON.stringify(clicks)}`);
   let browser;
   try {
-    browser = await puppeteer.launch({
+
+    browser = await puppeteerExtra.launch({
       headless: "new",
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
+      executablePath: puppeteer.executablePath()
     });
 
     const page = await browser.newPage();
+
     await page.goto(url, { waitUntil: "networkidle2" });
     console.log(`Page loaded: ${url}`);
     await page.setViewport({ width: 1280, height: 800 });
     // If we got clicks, execute them in sequence
     if (Array.isArray(clicks)) {
+      // if debug enabled, create pics directory
+      if (debug) {
+        await page.screenshot({ path: "pics/before-clicks.png", fullPage: true });
+      }
       for (const click of clicks) {
+        if (debug) {
+          await page.screenshot({ path: `pics/before-click-${clicks.indexOf(click)}.png`, fullPage: true });
+        }
         try {
           let selector;
 
@@ -77,6 +94,10 @@ app.post("/render", async (req, res) => {
         } catch (err) {
           console.warn(`Click failed: ${JSON.stringify(click)} ->`, err.message);
         }
+        if (debug) {
+          await page.screenshot({ path: `pics/after-click-${clicks.indexOf(click)}.png`, fullPage: true });
+        }
+        // Small delay between clicks
       }
     }
 
