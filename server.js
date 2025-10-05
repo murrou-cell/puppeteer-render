@@ -10,7 +10,7 @@ app.post("/render", async (req, res) => {
   if (!url) {
     return res.status(400).send("Missing url");
   }
-
+  console.log(`Rendering URL: ${url} with clicks: ${JSON.stringify(clicks)}`);
   let browser;
   try {
     browser = await puppeteer.launch({
@@ -20,7 +20,8 @@ app.post("/render", async (req, res) => {
 
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: "networkidle2" });
-
+    console.log(`Page loaded: ${url}`);
+    await page.setViewport({ width: 1280, height: 800 });
     // If we got clicks, execute them in sequence
     if (Array.isArray(clicks)) {
       for (const click of clicks) {
@@ -36,14 +37,39 @@ app.post("/render", async (req, res) => {
           }
 
           if (selector) {
+            console.log(`Performing click on selector: ${selector}`);
             if (selector.startsWith("xpath/")) {
               const xpath = selector.replace("xpath/", "");
               await page.waitForXPath(xpath, { timeout: 5000 });
               const [el] = await page.$x(xpath);
-              if (el) await el.click();
+              if (el) {
+                try {
+                  console.log(`Clicking XPath: ${xpath}`);
+                  await el.click(); // normal click
+                  console.log(`Clicked XPath: ${xpath}`);
+                } catch {
+                  console.warn("XPath click failed, trying fallback");
+                  // force click fallback
+                  await el.evaluate(e => e.click());
+                  console.log(`Fallback clicked XPath: ${xpath}`);
+                }
+              }
             } else {
+              console.log(`Waiting for selector: ${selector}`);
               await page.waitForSelector(selector, { timeout: 5000 });
-              await page.click(selector);
+              console.log(`Clicking selector: ${selector}`);
+              try {
+                await page.click(selector); // normal click
+                console.log(`Clicked selector: ${selector}`);
+              } catch {
+                console.warn("CSS click failed, trying fallback");
+                // force click fallback
+                await page.evaluate(sel => {
+                  const el = document.querySelector(sel);
+                  if (el) el.click();
+                }, selector);
+                console.log(`Fallback clicked selector: ${selector}`);
+              }
             }
 
             await page.waitForTimeout(click.wait || 2000);
