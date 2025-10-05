@@ -89,7 +89,7 @@ app.post("/render", async (req, res) => {
               }
             }
 
-            await page.waitForTimeout(click.wait || 2000);
+            await new Promise(r => setTimeout(r, click.wait || 2000));
           }
         } catch (err) {
           console.warn(`Click failed: ${JSON.stringify(click)} ->`, err.message);
