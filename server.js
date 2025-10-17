@@ -11,6 +11,14 @@ puppeteerExtra.use(AdblockerPlugin());
 const app = express();
 app.use(express.json());
 
+
+let browserPromise = await puppeteerExtra.launch({
+  headless: "new",
+  args: ["--no-sandbox", "--disable-setuid-sandbox"],
+  executablePath: puppeteer.executablePath()
+});
+let browser = await browserPromise;
+
 app.post("/render", async (req, res) => {
   const { url, clicks } = req.body;
 
@@ -18,15 +26,17 @@ app.post("/render", async (req, res) => {
     return res.status(400).send("Missing url");
   }
   console.log(`Rendering URL: ${url} with clicks: ${JSON.stringify(clicks)}`);
-  let browser;
   try {
-
-    browser = await puppeteerExtra.launch({
-      headless: "new",
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-      executablePath: puppeteer.executablePath()
-    });
-
+    // catch if browser is closed and relaunch
+    if (!browser.isConnected()) {
+      console.log("Browser disconnected, relaunching...");
+      browserPromise = await puppeteerExtra.launch({
+        headless: "new",
+        args: ["--no-sandbox", "--disable-setuid-sandbox"],
+        executablePath: puppeteer.executablePath()
+      });
+      browser = await browserPromise;
+    }
     const page = await browser.newPage();
 
     await page.goto(url, { waitUntil: "networkidle2" });
@@ -89,7 +99,7 @@ app.post("/render", async (req, res) => {
               }
             }
 
-            await new Promise(r => setTimeout(r, click.wait || 2000));
+            await new Promise(r => setTimeout(r, click.wait || 300));
           }
         } catch (err) {
           console.warn(`Click failed: ${JSON.stringify(click)} ->`, err.message);
@@ -97,20 +107,16 @@ app.post("/render", async (req, res) => {
         if (debug) {
           await page.screenshot({ path: `pics/after-click-${clicks.indexOf(click)}.png`, fullPage: true });
         }
-        // Small delay between clicks
       }
     }
-
     const html = await page.content();
-
+    if (page) { await page.close(); }
     res.set("Content-Type", "text/html; charset=utf-8");
     res.send(html);
 
   } catch (err) {
     console.error("Render error:", err);
     res.status(500).send("Failed to render page");
-  } finally {
-    if (browser) await browser.close();
   }
 });
 
