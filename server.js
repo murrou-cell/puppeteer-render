@@ -6,7 +6,9 @@ import AdblockerPlugin from "puppeteer-extra-plugin-adblocker";
 // debug is enabled if first argument is "debug"
 const debug = process.argv[2] === "debug";
 
-puppeteerExtra.use(AdblockerPlugin());
+puppeteerExtra.use(
+  AdblockerPlugin()
+);
 
 const app = express();
 app.use(express.json());
@@ -20,7 +22,7 @@ let browserPromise = await puppeteerExtra.launch({
 let browser = await browserPromise;
 
 app.post("/render", async (req, res) => {
-  const { url, clicks } = req.body;
+  const { url, clicks, includeHeaders, includeCookies } = req.body;
 
   if (!url) {
     return res.status(400).send("Missing url");
@@ -39,9 +41,14 @@ app.post("/render", async (req, res) => {
     }
     const page = await browser.newPage();
 
-    await page.goto(url, { waitUntil: "networkidle2" });
+    // TODO: add future options to set headers from the request
+    // await page.setExtraHTTPHeaders({
+    //   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) Gecko/20100101 Firefox/144.0",
+    // });
+    const response = await page.goto(url, { waitUntil: "domcontentloaded" });// or networkidle2;
     console.log(`Page loaded: ${url}`);
     await page.setViewport({ width: 1280, height: 800 });
+    
     // If we got clicks, execute them in sequence
     if (Array.isArray(clicks)) {
       // if debug enabled, create pics directory
@@ -109,7 +116,24 @@ app.post("/render", async (req, res) => {
         }
       }
     }
+    
     const html = await page.content();
+    let responseJson = {};
+    if (includeHeaders) {
+      const headers = response.headers();
+      responseJson.headers = headers;
+    }
+    if (includeCookies) {
+      const cookies = await page.cookies();
+      responseJson.cookies = cookies;
+    }
+    if (includeHeaders || includeCookies) {
+      responseJson.html = html;
+      if (page) { await page.close(); }
+      res.set("Content-Type", "application/json; charset=utf-8");
+      return res.send(JSON.stringify(responseJson));
+    }
+    
     if (page) { await page.close(); }
     res.set("Content-Type", "text/html; charset=utf-8");
     res.send(html);
