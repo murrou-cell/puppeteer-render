@@ -2,7 +2,6 @@ import express from "express";
 import puppeteerExtra from "puppeteer-extra";
 import puppeteer from "puppeteer"; // make sure Puppeteer is installed
 import AdblockerPlugin from "puppeteer-extra-plugin-adblocker";
-
 // debug is enabled if first argument is "debug"
 const debug = process.argv[2] === "debug";
 
@@ -141,6 +140,90 @@ app.post("/render", async (req, res) => {
   } catch (err) {
     console.error("Render error:", err);
     res.status(500).send("Failed to render page");
+  }
+});
+
+// EXAMPLE RUN
+  // {
+  //   "url": "https://mikaylaarealike.com/e/zw8fogt8fgao",
+  //   "timeout": 1000,
+  //   "scripts": [
+  //     "window.jwplayer?.().play()"
+  //   ],
+  //   "filters": {
+  //     "include": [".m3u8"],
+  //     "exclude": [".gif", "analytics"],
+  //     "matchRegex": ".m3u8",
+  //     "resourceTypes": ["xhr", "fetch"]
+  //   }
+  // }
+app.post("/intercept", async (req, res) => {
+  const {
+    url,
+    scripts = [],
+    timeout = 10000,
+    filters = {}
+  } = req.body;
+
+  if (!url) return res.status(400).json({ error: "Missing 'url' field" });
+
+  const { include = [], exclude = [], matchRegex = null, resourceTypes = [] } = filters;
+
+  const browser = await browserPromise;
+  const page = await browser.newPage();
+  const captured = new Set();
+
+  try {
+    await page.setRequestInterception(true);
+
+    page.on("request", (reqIntercept) => {
+      const u = reqIntercept.url();
+      const type = reqIntercept.resourceType();
+
+      // Only process resource types you specified (if any)
+      if (resourceTypes.length > 0 && !resourceTypes.includes(type)) {
+        return reqIntercept.continue();
+      }
+
+      // Apply include/exclude/regex filters dynamically
+      const included = include.length === 0 || include.some(p => u.includes(p));
+      const excluded = exclude.some(p => u.includes(p));
+      const regexMatch = matchRegex ? new RegExp(matchRegex, "i").test(u) : true;
+
+      if (included && !excluded && regexMatch) {
+        console.log("🎯 Intercepted:", u);
+        captured.add(u);
+        reqIntercept.abort();
+        return;
+      }
+
+      // Otherwise, continue request
+      reqIntercept.continue();
+    });
+
+    console.log("🌐 Navigating:", url);
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout });
+
+    // Run user scripts
+    for (const script of scripts) {
+      try {
+        console.log("⚙️ Executing script:", script);
+        await page.evaluate(script => eval(script), script);
+        await new Promise(r => setTimeout(r, 1000));
+      } catch (e) {
+        console.warn("⚠️ Script failed:", e.message);
+      }
+    }
+
+    res.json({
+      success: captured.size > 0,
+      totalFound: captured.size,
+      intercepted: [...captured]
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally {
+    await page.close();
   }
 });
 
