@@ -162,7 +162,8 @@ app.post("/intercept", async (req, res) => {
     url,
     scripts = [],
     timeout = 10000,
-    filters = {}
+    filters = {},
+    headers = {}
   } = req.body;
 
   if (!url) return res.status(400).json({ error: "Missing 'url' field" });
@@ -175,6 +176,18 @@ app.post("/intercept", async (req, res) => {
 
   try {
     await page.setRequestInterception(true);
+
+    // Apply optional per-request headers (e.g. Referer/Origin) to the whole
+    // page before the initial navigation. Cloudflare's Turnstile "invisible"
+    // challenge keys its solve to the Referer, so the caller passes the
+    // player's expected origin and puppeteer sends it on the initial CDN
+    // document and every subsequent request. Backward compatible: an absent or
+    // empty object is a no-op, so existing callers (filmi9, etc.) are unchanged.
+    // This is the request-header support the /render TODO describes, wired
+    // into /intercept so bayflix can send its Referer.
+    if (headers && Object.keys(headers).length > 0) {
+      await page.setExtraHTTPHeaders(headers);
+    }
 
     page.on("request", (reqIntercept) => {
       const u = reqIntercept.url();
