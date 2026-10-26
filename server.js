@@ -2,11 +2,23 @@ import express from "express";
 import puppeteerExtra from "puppeteer-extra";
 import puppeteer from "puppeteer"; // make sure Puppeteer is installed
 import AdblockerPlugin from "puppeteer-extra-plugin-adblocker";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
 // debug is enabled if first argument is "debug"
 const debug = process.argv[2] === "debug";
 
+// Run headed when an X display is available (xvfb-run in the container) so the
+// browser presents a real, non-headless fingerprint to bot detection (Cloudflare
+// Turnstile). Fall back to "new" headless when no display is set, so the service
+// still boots in display-less environments instead of crash-looping.
+const headless = process.env.DISPLAY ? false : "new";
+
 puppeteerExtra.use(
-  AdblockerPlugin()
+  AdblockerPlugin(),
+  // Stealth patches the residual JS-level automation tells (navigator.webdriver,
+  // window.chrome, plugins/mimeTypes, ...). As of 2026 stealth alone does NOT
+  // defeat Cloudflare — the CDP/TLS fingerprint still flags automation — so it
+  // is combined with headed (Xvfb) mode above, which removes the headless signal.
+  StealthPlugin()
 );
 
 const app = express();
@@ -14,8 +26,8 @@ app.use(express.json());
 
 
 let browserPromise = await puppeteerExtra.launch({
-  headless: "new",
-  args: ["--no-sandbox", "--disable-setuid-sandbox"],
+  headless,
+  args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"],
   executablePath: puppeteer.executablePath()
 });
 let browser = await browserPromise;
@@ -32,8 +44,8 @@ app.post("/render", async (req, res) => {
     if (!browser.isConnected()) {
       console.log("Browser disconnected, relaunching...");
       browserPromise = await puppeteerExtra.launch({
-        headless: "new",
-        args: ["--no-sandbox", "--disable-setuid-sandbox"],
+        headless,
+        args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"],
         executablePath: puppeteer.executablePath()
       });
       browser = await browserPromise;
@@ -217,11 +229,26 @@ app.post("/intercept", async (req, res) => {
     console.log("🌐 Navigating:", url);
     await page.goto(url, { waitUntil: "domcontentloaded", timeout });
 
-    // Run user scripts
+    // Run user scripts. A script that returns a Promise (e.g. bayflix's
+    // time-delayed `new Promise(r => setTimeout(r, 10000))`) is awaited INSIDE
+    // the evaluation so the capture window stays open for the script's full
+    // duration. A plain `page.evaluate(fn, arg)` returns as soon as `fn`
+    // returns — so a Promise-returning script would otherwise resolve
+    // immediately and the window would close before a delayed
+    // (Turnstile solve -> redirect -> .m3u8) request can be intercepted. The
+    // async wrapper is deliberate: Puppeteer always awaits an async function's
+    // result, and `await result` below holds that open until the inner Promise
+    // settles. Non-Promise scripts resolve immediately (no behaviour change).
     for (const script of scripts) {
       try {
         console.log("⚙️ Executing script:", script);
-        await page.evaluate(script => eval(script), script);
+        await page.evaluate(async (s) => {
+          const result = eval(s);
+          if (result && typeof result === "object" && typeof result.then === "function") {
+            await result;
+          }
+          return result;
+        }, script);
         await new Promise(r => setTimeout(r, 1000));
       } catch (e) {
         console.warn("⚠️ Script failed:", e.message);
