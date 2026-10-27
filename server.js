@@ -32,6 +32,24 @@ let browserPromise = await puppeteerExtra.launch({
 });
 let browser = await browserPromise;
 
+const RENDER_DEADLINE_MS = Number(process.env.RENDER_DEADLINE_MS) || 45000;
+
+// Rejects after ms so a hung page.* call cannot hold a page (and its CPU) open forever.
+const withDeadline = (p, ms) => Promise.race([
+  p,
+  new Promise((_, rej) => setTimeout(() => rej(new Error(`deadline ${ms}ms exceeded`)), ms)),
+]);
+
+// Close without ever throwing or hanging the handler; a stuck close falls back to killing the target.
+const closePage = async (page) => {
+  if (!page) return;
+  try {
+    await withDeadline(page.close({ runBeforeUnload: false }), 5000);
+  } catch {
+    try { await page.target().createCDPSession().then(c => c.send("Page.crash")); } catch {}
+  }
+};
+
 app.post("/render", async (req, res) => {
   const { url, clicks, includeHeaders, includeCookies } = req.body;
 
@@ -39,7 +57,9 @@ app.post("/render", async (req, res) => {
     return res.status(400).send("Missing url");
   }
   console.log(`Rendering URL: ${url} with clicks: ${JSON.stringify(clicks)}`);
+  let page;
   try {
+    await withDeadline((async () => {
     // catch if browser is closed and relaunch
     if (!browser.isConnected()) {
       console.log("Browser disconnected, relaunching...");
@@ -50,13 +70,15 @@ app.post("/render", async (req, res) => {
       });
       browser = await browserPromise;
     }
-    const page = await browser.newPage();
+    page = await browser.newPage();
+    page.setDefaultTimeout(30000);
+    page.setDefaultNavigationTimeout(30000);
 
     // TODO: add future options to set headers from the request
     // await page.setExtraHTTPHeaders({
     //   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) Gecko/20100101 Firefox/144.0",
     // });
-    const response = await page.goto(url, { waitUntil: "domcontentloaded" });// or networkidle2;
+    const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });// or networkidle2;
     console.log(`Page loaded: ${url}`);
     await page.setViewport({ width: 1280, height: 800 });
     
@@ -140,18 +162,18 @@ app.post("/render", async (req, res) => {
     }
     if (includeHeaders || includeCookies) {
       responseJson.html = html;
-      if (page) { await page.close(); }
       res.set("Content-Type", "application/json; charset=utf-8");
       return res.send(JSON.stringify(responseJson));
     }
-    
-    if (page) { await page.close(); }
+
     res.set("Content-Type", "text/html; charset=utf-8");
     res.send(html);
-
+    })(), RENDER_DEADLINE_MS);
   } catch (err) {
     console.error("Render error:", err);
-    res.status(500).send("Failed to render page");
+    if (!res.headersSent) res.status(500).send("Failed to render page");
+  } finally {
+    await closePage(page);
   }
 });
 
@@ -185,8 +207,10 @@ app.post("/intercept", async (req, res) => {
   const browser = await browserPromise;
   const page = await browser.newPage();
   const captured = new Set();
+  res.on("close", () => { if (!res.writableFinished) closePage(page); });
 
   try {
+    await withDeadline((async () => {
     await page.setRequestInterception(true);
 
     // Apply optional per-request headers (e.g. Referer/Origin) to the whole
@@ -255,18 +279,20 @@ app.post("/intercept", async (req, res) => {
       }
     }
 
+    })(), RENDER_DEADLINE_MS);
+
     res.json({
       success: captured.size > 0,
       totalFound: captured.size,
       intercepted: [...captured]
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    if (!res.headersSent) res.status(500).json({ error: err.message });
   } finally {
-    await page.close();
+    await closePage(page);
   }
 });
 
 app.listen(3000, () => {
   console.log("Puppeteer render service running on port 3000");
-});
+});
